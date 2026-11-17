@@ -310,6 +310,18 @@ INDEX_HTML = """<!doctype html>
  .qa-card{margin-top:1rem;padding:.8rem 1rem;border:1px solid #30363d;border-radius:10px;background:#0f141b}
  .qa-card .q{font-weight:600;margin-bottom:.4rem}
  .qa-card .q::before{content:"🧑 ";}
+ .cell{margin-top:1.4rem;padding-top:1rem;border-top:1px solid #21262d}
+ .cell:first-child{border-top:0;padding-top:0}
+ .cell .ask{margin-bottom:.3rem}
+ .ans{overflow-x:auto;line-height:1.5;margin-top:.4rem}
+ .md table{border-collapse:collapse;margin:.5rem 0;font-size:.9rem;display:block;overflow-x:auto}
+ .md th,.md td{border:1px solid #30363d;padding:.3rem .55rem;text-align:left}
+ .md th{background:#161b22}
+ .md code{background:#161b22;padding:.1rem .3rem;border-radius:4px;font-size:.88em}
+ .md pre{background:#161b22;padding:.8rem;border-radius:8px;overflow-x:auto}
+ .md pre code{background:none;padding:0}
+ .md h1,.md h2,.md h3{font-size:1.02rem;margin:.7rem 0 .3rem}
+ .md p{margin:.4rem 0} .md ul,.md ol{margin:.3rem 0 .3rem 1.2rem}
 </style></head>
 <body>
  <h1>🔍 Repo Explainer Agent</h1>
@@ -318,10 +330,9 @@ INDEX_HTML = """<!doctype html>
  <button id="load" onclick="ingest()">Load repo</button>
  <span id="status" class="muted"></span>
  <div id="qa" style="display:none;margin-top:1.2rem">
-   <textarea id="q" rows="2" placeholder="Ask a question about the repo… (you can ask as many as you like)"></textarea>
-   <button id="ask" onclick="ask()">Ask</button>
-   <div id="log"></div>
+   <div id="cells"></div>
  </div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script>
 async function ingest(){
   const b=document.getElementById('load'); b.disabled=true;
@@ -332,26 +343,31 @@ async function ingest(){
   if(d.error){document.getElementById('status').textContent=' ⚠ '+d.error;return;}
   document.getElementById('status').textContent=` ✓ ${d.repo}: ${d.num_files} files, ${d.num_chunks} chunks`;
   document.getElementById('qa').style.display='block';
+  const cells=document.getElementById('cells'); cells.innerHTML=''; addCell();
 }
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
-async function ask(){
-  const qEl=document.getElementById('q'); const q=qEl.value.trim(); if(!q) return;
-  const b=document.getElementById('ask'); b.disabled=true;
-  const card=document.createElement('div'); card.className='qa-card';
-  card.innerHTML=`<div class="q">${esc(q)}</div><div class="cits"></div><pre class="ans">Thinking…</pre>`;
-  document.getElementById('log').prepend(card);
-  qEl.value='';
+function addCell(){
+  const cell=document.createElement('div'); cell.className='cell';
+  cell.innerHTML=`<textarea class="q" rows="2" placeholder="Ask a question about the repo…"></textarea>`
+    +`<button class="ask">Ask</button><div class="cits"></div><div class="ans md"></div>`;
+  document.getElementById('cells').appendChild(cell);
+  const ta=cell.querySelector('.q'), btn=cell.querySelector('.ask');
+  btn.onclick=()=>askCell(cell,ta,btn);
+  ta.focus(); cell.scrollIntoView({behavior:'smooth',block:'center'});
+}
+async function askCell(cell,ta,btn){
+  const q=ta.value.trim(); if(!q) return;
+  btn.disabled=true; ta.disabled=true;
+  const ans=cell.querySelector('.ans'); ans.textContent='Thinking…';
   try{
     const r=await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({question:q})});
     const d=await r.json();
-    if(d.error){card.querySelector('.ans').textContent='⚠ '+d.error;}
-    else{
-      card.querySelector('.ans').textContent=d.answer;
-      card.querySelector('.cits').innerHTML=(d.citations||[]).map(c=>`<span class="cit">${esc(c)}</span>`).join('');
-    }
-  }catch(e){card.querySelector('.ans').textContent='⚠ '+e;}
-  b.disabled=false; qEl.focus();
+    if(d.error){ans.textContent='⚠ '+d.error; btn.disabled=false; ta.disabled=false; return;}
+    ans.innerHTML=window.marked?marked.parse(d.answer):esc(d.answer);
+    cell.querySelector('.cits').innerHTML=(d.citations||[]).map(c=>`<span class="cit">${esc(c)}</span>`).join('');
+    addCell();
+  }catch(e){ans.textContent='⚠ '+e; btn.disabled=false; ta.disabled=false;}
 }
 </script>
 </body></html>"""
