@@ -225,13 +225,19 @@ def _synthesize(question, context):
         return "Here are the most relevant code sections:\n\n" + (context[0] if context else "(none)")
 
 
-def run_agent(question: str, max_steps: int = 4):
+def run_agent(question: str, max_steps: int = 2):
+    # Pre-retrieve relevant code (instant, no LLM) so the model can usually answer
+    # in a single call instead of discovering files over several round-trips.
+    seed = tool_search_code(question, k=6)
+    cited = {m.split(":")[0] for m in re.findall(r"[\w./-]+:\d+-\d+", seed)}
+    context = [seed]
     messages = [
         {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": f"Repo: {INDEX['repo']}\n\nQuestion: {question}"},
+        {"role": "user", "content":
+         f"Repo: {INDEX['repo']}\n\nQuestion: {question}\n\n"
+         f"Relevant code from an initial search:\n{seed}\n\n"
+         "Answer using this code. Only call a tool if you genuinely need more context."},
     ]
-    cited = set()
-    context = []  # raw tool outputs, used for the final synthesis
     for _ in range(max_steps):
         msg = _complete_with_tools(messages).choices[0].message
         if not msg.tool_calls:
@@ -301,6 +307,9 @@ INDEX_HTML = """<!doctype html>
  button:disabled{opacity:.5}
  .muted{color:#8b949e;font-size:.9rem} pre{white-space:pre-wrap;background:#161b22;padding:1rem;border-radius:8px;border:1px solid #30363d}
  .cit{display:inline-block;background:#1f6feb33;border:1px solid #1f6feb;border-radius:6px;padding:.1rem .4rem;margin:.15rem;font-size:.85rem}
+ .qa-card{margin-top:1rem;padding:.8rem 1rem;border:1px solid #30363d;border-radius:10px;background:#0f141b}
+ .qa-card .q{font-weight:600;margin-bottom:.4rem}
+ .qa-card .q::before{content:"🧑 ";}
 </style></head>
 <body>
  <h1>🔍 Repo Explainer Agent</h1>
@@ -309,10 +318,9 @@ INDEX_HTML = """<!doctype html>
  <button id="load" onclick="ingest()">Load repo</button>
  <span id="status" class="muted"></span>
  <div id="qa" style="display:none;margin-top:1.2rem">
-   <textarea id="q" rows="2" placeholder="e.g. How does authentication work?"></textarea>
+   <textarea id="q" rows="2" placeholder="Ask a question about the repo… (you can ask as many as you like)"></textarea>
    <button id="ask" onclick="ask()">Ask</button>
-   <div id="cits"></div>
-   <pre id="ans"></pre>
+   <div id="log"></div>
  </div>
 <script>
 async function ingest(){
@@ -325,16 +333,25 @@ async function ingest(){
   document.getElementById('status').textContent=` ✓ ${d.repo}: ${d.num_files} files, ${d.num_chunks} chunks`;
   document.getElementById('qa').style.display='block';
 }
+function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 async function ask(){
+  const qEl=document.getElementById('q'); const q=qEl.value.trim(); if(!q) return;
   const b=document.getElementById('ask'); b.disabled=true;
-  document.getElementById('ans').textContent='Thinking…';
-  document.getElementById('cits').innerHTML='';
-  const r=await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({question:document.getElementById('q').value})});
-  const d=await r.json(); b.disabled=false;
-  if(d.error){document.getElementById('ans').textContent='⚠ '+d.error;return;}
-  document.getElementById('ans').textContent=d.answer;
-  document.getElementById('cits').innerHTML=(d.citations||[]).map(c=>`<span class="cit">${c}</span>`).join('');
+  const card=document.createElement('div'); card.className='qa-card';
+  card.innerHTML=`<div class="q">${esc(q)}</div><div class="cits"></div><pre class="ans">Thinking…</pre>`;
+  document.getElementById('log').prepend(card);
+  qEl.value='';
+  try{
+    const r=await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:q})});
+    const d=await r.json();
+    if(d.error){card.querySelector('.ans').textContent='⚠ '+d.error;}
+    else{
+      card.querySelector('.ans').textContent=d.answer;
+      card.querySelector('.cits').innerHTML=(d.citations||[]).map(c=>`<span class="cit">${esc(c)}</span>`).join('');
+    }
+  }catch(e){card.querySelector('.ans').textContent='⚠ '+e;}
+  b.disabled=false; qEl.focus();
 }
 </script>
 </body></html>"""
