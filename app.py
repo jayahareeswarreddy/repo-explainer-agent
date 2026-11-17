@@ -13,6 +13,7 @@ import io
 import os
 import re
 import json
+import time
 import zipfile
 
 import numpy as np
@@ -215,30 +216,43 @@ def _synthesize(question, context):
          "the answer, say so plainly."},
         {"role": "user", "content": f"Question: {question}\n\nCode excerpts:\n{excerpts}"},
     ]
+    t = time.time()
+    print(f"[synthesize] model={GROQ_MODEL} prompt_chars={len(excerpts)} -> calling Groq...", flush=True)
     try:
         resp = groq_client.chat.completions.create(
             model=GROQ_MODEL, messages=msgs, temperature=0.2,
             extra_body={"reasoning_effort": "low"})
+        print(f"[synthesize] Groq returned in {time.time()-t:.1f}s  usage={getattr(resp, 'usage', None)}", flush=True)
         return resp.choices[0].message.content or ""
-    except Exception:
+    except Exception as e:
+        print(f"[synthesize] ERROR after {time.time()-t:.1f}s: {e}", flush=True)
         # last-resort fallback: hand back the most relevant excerpt
         return "Here are the most relevant code sections:\n\n" + (context[0] if context else "(none)")
 
 
-def run_agent(question: str, max_steps: int = 2):
-    # Pre-retrieve relevant code (instant, no LLM) so the model can usually answer
-    # in a single call instead of discovering files over several round-trips.
-    seed = tool_search_code(question, k=6)
+def run_agent(question: str, deep: bool = False):
+    """Default: fast single-pass (retrieve top code, one LLM call to answer).
+    deep=True runs the full tool-calling agent loop (slower, for hard questions)."""
+    t = time.time()
+    seed = tool_search_code(question, k=5)
+    print(f"[agent] deep={deep} seed_retrieval={time.time()-t:.2f}s seed_chars={len(seed)}", flush=True)
     cited = {m.split(":")[0] for m in re.findall(r"[\w./-]+:\d+-\d+", seed)}
+
+    if not deep:
+        r = {"answer": _synthesize(question, [seed]), "citations": sorted(cited)}
+        print(f"[agent] total /ask time {time.time()-t:.1f}s", flush=True)
+        return r
+
+    # --- deep mode: let the model call tools to gather more context ---
     context = [seed]
     messages = [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content":
          f"Repo: {INDEX['repo']}\n\nQuestion: {question}\n\n"
          f"Relevant code from an initial search:\n{seed}\n\n"
-         "Answer using this code. Only call a tool if you genuinely need more context."},
+         "Answer using this code. Call a tool only if you genuinely need more."},
     ]
-    for _ in range(max_steps):
+    for _ in range(3):
         msg = _complete_with_tools(messages).choices[0].message
         if not msg.tool_calls:
             return {"answer": msg.content or "", "citations": sorted(cited)}
@@ -259,8 +273,6 @@ def run_agent(question: str, max_steps: int = 2):
             for m in re.findall(r"[\w./-]+:\d+-\d+", result):
                 cited.add(m.split(":")[0])
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result[:4000]})
-
-    # Used the step budget on tool calls — synthesize a final answer separately.
     return {"answer": _synthesize(question, context), "citations": sorted(cited)}
 
 # ----------------------------- API ----------------------------------------
