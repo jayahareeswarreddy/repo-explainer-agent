@@ -24,7 +24,7 @@ from fastembed import TextEmbedding
 from groq import Groq
 
 # ----------------------------- config -------------------------------------
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "openai/gpt-oss-20b"
 EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 CODE_EXTS = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rb", ".rs",
@@ -198,18 +198,42 @@ SYSTEM = (
 )
 
 # ----------------------------- agent loop ---------------------------------
-def run_agent(question: str, max_steps: int = 6):
+def _complete_with_tools(messages):
+    return groq_client.chat.completions.create(
+        model=GROQ_MODEL, messages=messages, tools=TOOLS, tool_choice="auto",
+        temperature=0.2, extra_body={"reasoning_effort": "low"},
+    )
+
+
+def _synthesize(question, context):
+    """Final answer from gathered code, as a clean tool-free call."""
+    excerpts = "\n\n".join(context)[:14000]
+    msgs = [
+        {"role": "system", "content":
+         "You are a code assistant. Answer the question using ONLY the code excerpts "
+         "provided. Cite sources as `path:line-range`. If the excerpts don't contain "
+         "the answer, say so plainly."},
+        {"role": "user", "content": f"Question: {question}\n\nCode excerpts:\n{excerpts}"},
+    ]
+    try:
+        resp = groq_client.chat.completions.create(
+            model=GROQ_MODEL, messages=msgs, temperature=0.2,
+            extra_body={"reasoning_effort": "low"})
+        return resp.choices[0].message.content or ""
+    except Exception:
+        # last-resort fallback: hand back the most relevant excerpt
+        return "Here are the most relevant code sections:\n\n" + (context[0] if context else "(none)")
+
+
+def run_agent(question: str, max_steps: int = 4):
     messages = [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": f"Repo: {INDEX['repo']}\n\nQuestion: {question}"},
     ]
     cited = set()
+    context = []  # raw tool outputs, used for the final synthesis
     for _ in range(max_steps):
-        resp = groq_client.chat.completions.create(
-            model=GROQ_MODEL, messages=messages, tools=TOOLS, tool_choice="auto",
-            temperature=0.2,
-        )
-        msg = resp.choices[0].message
+        msg = _complete_with_tools(messages).choices[0].message
         if not msg.tool_calls:
             return {"answer": msg.content or "", "citations": sorted(cited)}
         messages.append({
@@ -224,13 +248,14 @@ def run_agent(question: str, max_steps: int = 6):
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
-            result = DISPATCH.get(tc.function.name, lambda a: "Unknown tool")(args)
-            for m in re.findall(r"[\w./-]+:\d+-\d+", str(result)):
+            result = str(DISPATCH.get(tc.function.name, lambda a: "Unknown tool")(args))
+            context.append(result)
+            for m in re.findall(r"[\w./-]+:\d+-\d+", result):
                 cited.add(m.split(":")[0])
-            messages.append({"role": "tool", "tool_call_id": tc.id,
-                             "content": str(result)[:6000]})
-    return {"answer": "Reached the step limit without a final answer. Try a more specific question.",
-            "citations": sorted(cited)}
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result[:4000]})
+
+    # Used the step budget on tool calls — synthesize a final answer separately.
+    return {"answer": _synthesize(question, context), "citations": sorted(cited)}
 
 # ----------------------------- API ----------------------------------------
 class IngestReq(BaseModel):
