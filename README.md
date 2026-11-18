@@ -5,7 +5,7 @@ answers grounded in the actual code, **with file/line citations**. A Groq LLM
 drives a plan-act-observe **agent loop** over three tools, deciding when to
 search, read a file, or browse the structure before it answers.
 
-**Links:** [Live demo](https://repo-explainer-agent.onrender.com) · Built with FastAPI, Groq (gpt-oss-20b), fastembed (ONNX)
+**Links:** [Live demo](https://repo-explainer-agent.onrender.com) · Built with FastAPI, Groq (gpt-oss-20b), Jina embeddings
 
 ## What makes it an agent (not just RAG)
 
@@ -17,7 +17,7 @@ question → LLM decides which tool to call → tool runs → LLM observes
 ```
 
 **Tools the agent can call**
-- `search_code(query)` — semantic search over the repo (ONNX embeddings + cosine)
+- `search_code(query)` — semantic search over the repo (Jina embeddings + cosine)
 - `read_file(path)` — inspect a specific file
 - `list_files()` — browse the repo structure
 
@@ -26,9 +26,9 @@ rather than hallucinate.
 
 ## Design notes
 
-- **Lightweight on purpose** — embeddings run on CPU via `fastembed` (ONNX, no
-  PyTorch) and the vector search is in-memory NumPy cosine, so it fits a free
-  Render instance.
+- **Lightweight on purpose** — embeddings are called from the Jina API (not run
+  in-process), and the vector search is in-memory NumPy cosine, so the web app's
+  memory footprint stays tiny and fits a free Render instance (no PyTorch/ONNX).
 - Repos are fetched as a zip via the GitHub API, filtered to code/text files,
   and chunked by line windows (60 lines, 10 overlap), capped for memory safety.
 
@@ -36,7 +36,7 @@ rather than hallucinate.
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env     # add your GROQ_API_KEY
+cp .env.example .env     # add your GROQ_API_KEY and JINA_API_KEY
 # load env vars, then:
 uvicorn app:app --reload
 ```
@@ -48,7 +48,7 @@ Get a free Groq key at https://console.groq.com .
 
 1. Push this repo to GitHub.
 2. On Render: **New → Blueprint**, point it at this repo (`render.yaml` is included).
-3. Set the `GROQ_API_KEY` environment variable (and optionally `GITHUB_TOKEN`).
+3. Set the `GROQ_API_KEY` and `JINA_API_KEY` environment variables (and optionally `GITHUB_TOKEN`).
 4. Deploy — Render gives you a public URL.
 
 ## Environment variables
@@ -56,6 +56,7 @@ Get a free Groq key at https://console.groq.com .
 | Var | Required | Purpose |
 |-----|----------|---------|
 | `GROQ_API_KEY` | yes | LLM inference (Groq) |
+| `JINA_API_KEY` | yes | Text embeddings (Jina) |
 | `GITHUB_TOKEN` | no | Raises GitHub API rate limit (read-only token) |
 
 ## Limitations

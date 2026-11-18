@@ -1,7 +1,6 @@
 fastapi
 uvicorn[standard]
 groq
-fastembed
 requests
 numpy
 pydantic

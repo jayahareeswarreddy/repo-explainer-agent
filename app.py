@@ -5,8 +5,9 @@ Paste a public GitHub repo URL, then ask questions about the code. A Groq LLM
 drives a plan-act-observe agent loop over three tools (search_code, read_file,
 list_files) and answers with file/line citations.
 
-Lightweight by design (ONNX embeddings via fastembed, in-memory cosine search)
-so it fits a free Render instance. No GPU, no torch.
+Lightweight by design: embeddings are called from the Jina API (not run
+in-process), with in-memory cosine search, so the web app's memory footprint
+stays tiny and fits a free Render instance. No GPU, no torch, no local model.
 """
 
 import io
@@ -21,12 +22,12 @@ import requests
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
-from fastembed import TextEmbedding
 from groq import Groq
 
 # ----------------------------- config -------------------------------------
 GROQ_MODEL = "openai/gpt-oss-20b"
-EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+JINA_API_KEY = os.environ.get("JINA_API_KEY", "")
+JINA_MODEL = "jina-embeddings-v2-small-en"
 CODE_EXTS = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rb", ".rs",
     ".c", ".h", ".cpp", ".hpp", ".cs", ".php", ".kt", ".swift", ".scala",
@@ -46,8 +47,25 @@ if GITHUB_TOKEN:
     GH_HEADERS["Authorization"] = f"Bearer {GITHUB_TOKEN}"
 
 app = FastAPI(title="Repo Explainer Agent")
-embedder = TextEmbedding(model_name=EMBED_MODEL)
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+
+
+def embed(texts):
+    """Embed a list of strings via the Jina API. Returns an (n, dim) float32 array."""
+    vectors = []
+    for i in range(0, len(texts), 96):  # batch to keep payloads reasonable
+        batch = texts[i:i + 96]
+        r = requests.post(
+            "https://api.jina.ai/v1/embeddings",
+            headers={"Authorization": f"Bearer {JINA_API_KEY}",
+                     "Content-Type": "application/json"},
+            json={"model": JINA_MODEL, "input": batch},
+            timeout=60,
+        )
+        r.raise_for_status()
+        items = sorted(r.json()["data"], key=lambda d: d["index"])
+        vectors.extend(d["embedding"] for d in items)
+    return np.array(vectors, dtype=np.float32)
 
 # in-memory index for the currently loaded repo (single-session demo)
 INDEX = {"repo": None, "files": {}, "chunks": [], "matrix": None, "norms": None}
@@ -125,7 +143,7 @@ def build_index(repo_url: str):
             chunks = chunks[:MAX_CHUNKS]
             break
 
-    vectors = np.array(list(embedder.embed([c["text"] for c in chunks])), dtype=np.float32)
+    vectors = embed([c["text"] for c in chunks])
     norms = np.linalg.norm(vectors, axis=1) + 1e-8
 
     INDEX.update(repo=f"{owner}/{repo}", files=files, chunks=chunks,
@@ -136,7 +154,7 @@ def build_index(repo_url: str):
 def tool_search_code(query: str, k: int = 6):
     if INDEX["matrix"] is None:
         return "No repo loaded."
-    qv = np.array(next(embedder.embed([query])), dtype=np.float32)
+    qv = embed([query])[0]
     sims = (INDEX["matrix"] @ qv) / (INDEX["norms"] * (np.linalg.norm(qv) + 1e-8))
     top = sims.argsort()[-k:][::-1]
     results = []
