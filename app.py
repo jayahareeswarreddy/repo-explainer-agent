@@ -26,7 +26,7 @@ from groq import Groq
 
 # ----------------------------- config -------------------------------------
 GROQ_MODEL = "openai/gpt-oss-20b"
-JINA_API_KEY = os.environ.get("JINA_API_KEY", "")
+JINA_API_KEY = os.environ.get("JINA_API_KEY") or os.environ.get("JINA_API_TOKEN", "")
 JINA_MODEL = "jina-embeddings-v2-small-en"
 CODE_EXTS = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rb", ".rs",
