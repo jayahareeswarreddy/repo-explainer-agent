@@ -16,10 +16,11 @@ import re
 import json
 import time
 import zipfile
+from collections import defaultdict
 
 import numpy as np
 import requests
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from groq import Groq
@@ -70,8 +71,22 @@ def embed(texts):
     return np.array(vectors, dtype=np.float32)
 
 # in-memory index for the currently loaded repo (single-session demo)
-INDEX = {"repo": None, "files": {}, "chunks": [], "matrix": None, "norms": None}
+INDEX = {"repo": None, "branch": "main", "files": {}, "chunks": [], "matrix": None, "norms": None}
 CONVO = []  # recent (question, answer) pairs, for follow-up questions
+
+# ----- simple in-memory per-IP rate limiting (protects free Groq/Jina quota) --
+_HITS = defaultdict(list)
+
+
+def rate_ok(ip, bucket, limit, window=600):
+    now = time.time()
+    q = _HITS[(ip, bucket)]
+    while q and q[0] < now - window:
+        q.pop(0)
+    if len(q) >= limit:
+        return False
+    q.append(now)
+    return True
 
 # ----------------------------- ingestion ----------------------------------
 def parse_repo(url: str):
@@ -118,7 +133,7 @@ def fetch_repo_files(owner: str, repo: str):
             files[rel] = text
             if len(files) >= MAX_FILES:
                 break
-    return files
+    return files, branch
 
 
 def chunk_file(path: str, text: str):
@@ -140,7 +155,7 @@ def chunk_file(path: str, text: str):
 
 def build_index(repo_url: str):
     owner, repo = parse_repo(repo_url)
-    files = fetch_repo_files(owner, repo)
+    files, branch = fetch_repo_files(owner, repo)
     if not files:
         raise ValueError("No readable code files found in this repo.")
 
@@ -154,10 +169,11 @@ def build_index(repo_url: str):
     vectors = embed([c["text"] for c in chunks])
     norms = np.linalg.norm(vectors, axis=1) + 1e-8
 
-    INDEX.update(repo=f"{owner}/{repo}", files=files, chunks=chunks,
+    INDEX.update(repo=f"{owner}/{repo}", branch=branch, files=files, chunks=chunks,
                  matrix=vectors, norms=norms)
     CONVO.clear()  # new repo => fresh conversation
-    return {"repo": f"{owner}/{repo}", "num_files": len(files), "num_chunks": len(chunks)}
+    return {"repo": f"{owner}/{repo}", "branch": branch,
+            "num_files": len(files), "num_chunks": len(chunks)}
 
 # ----------------------------- tools --------------------------------------
 def tool_search_code(query: str, k: int = 6):
@@ -270,7 +286,7 @@ def run_agent(question: str, deep: bool = False):
     search_q = f"{CONVO[-1][0]} {question}" if CONVO else question
     seed = tool_search_code(search_q, k=5)
     print(f"[agent] deep={deep} seed_retrieval={time.time()-t:.2f}s seed_chars={len(seed)}", flush=True)
-    cited = {m.split(":")[0] for m in re.findall(r"[\w./-]+:\d+-\d+", seed)}
+    cited = set(re.findall(r"[\w./-]+:\d+-\d+", seed))
 
     if not deep:
         answer = _synthesize(question, [seed], history=CONVO[-2:])
@@ -306,7 +322,7 @@ def run_agent(question: str, deep: bool = False):
             result = str(DISPATCH.get(tc.function.name, lambda a: "Unknown tool")(args))
             context.append(result)
             for m in re.findall(r"[\w./-]+:\d+-\d+", result):
-                cited.add(m.split(":")[0])
+                cited.add(m)
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result[:4000]})
     return {"answer": _synthesize(question, context), "citations": sorted(cited)}
 
@@ -317,10 +333,19 @@ class IngestReq(BaseModel):
 
 class AskReq(BaseModel):
     question: str
+    deep: bool = False
+
+
+def _client_ip(request: Request):
+    fwd = request.headers.get("x-forwarded-for")
+    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "unknown")
 
 
 @app.post("/ingest")
-def ingest(req: IngestReq):
+def ingest(req: IngestReq, request: Request):
+    if not rate_ok(_client_ip(request), "ingest", limit=20):
+        return JSONResponse({"error": "Rate limit: too many repo loads. Try again in a few minutes."},
+                            status_code=429)
     try:
         return build_index(req.repo_url)
     except Exception as e:
@@ -328,11 +353,14 @@ def ingest(req: IngestReq):
 
 
 @app.post("/ask")
-def ask(req: AskReq):
+def ask(req: AskReq, request: Request):
     if INDEX["matrix"] is None:
         return JSONResponse({"error": "Load a repo first."}, status_code=400)
+    if not rate_ok(_client_ip(request), "ask", limit=40):
+        return JSONResponse({"error": "Rate limit: too many questions. Try again in a few minutes."},
+                            status_code=429)
     try:
-        return run_agent(req.question)
+        return run_agent(req.question, deep=req.deep)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -343,99 +371,214 @@ def home():
 
 
 INDEX_HTML = """<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Repo Explainer Agent</title>
+<meta name="description" content="Load any public GitHub repo and ask questions about its code, answered with file-line citations.">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
- :root{color-scheme:dark}
- body{font-family:system-ui,sans-serif;max-width:820px;margin:2rem auto;padding:0 1rem;background:#0d1117;color:#e6edf3}
- h1{font-size:1.4rem} input,textarea,button{font:inherit}
- input,textarea{width:100%;box-sizing:border-box;background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:.6rem;margin:.3rem 0}
- button{background:#238636;color:#fff;border:0;border-radius:8px;padding:.6rem 1rem;cursor:pointer}
- button:disabled{opacity:.5}
- .muted{color:#8b949e;font-size:.9rem} pre{white-space:pre-wrap;background:#161b22;padding:1rem;border-radius:8px;border:1px solid #30363d}
- .cit{display:inline-block;background:#1f6feb33;border:1px solid #1f6feb;border-radius:6px;padding:.1rem .4rem;margin:.15rem;font-size:.85rem}
- .qa-card{margin-top:1rem;padding:.8rem 1rem;border:1px solid #30363d;border-radius:10px;background:#0f141b}
- .qa-card .q{font-weight:600;margin-bottom:.4rem}
- .qa-card .q::before{content:"🧑 ";}
- .cell{margin-top:1.4rem;padding-top:1rem;border-top:1px solid #21262d}
- .cell:first-child{border-top:0;padding-top:0}
- .cell .ask{margin-bottom:.3rem}
- .ans{overflow-x:auto;line-height:1.5;margin-top:.4rem}
+ :root{
+   --bg:#0F172A; --card:#1B2336; --muted:#272F42; --border:#334155;
+   --fg:#F8FAFC; --mfg:#94A3B8; --accent:#22C55E; --accent-fg:#0F172A;
+   --ring:#38BDF8; --danger:#F87171;
+   --sans:'IBM Plex Sans',system-ui,sans-serif; --mono:'JetBrains Mono',ui-monospace,monospace;
+   color-scheme:dark;
+ }
+ *{box-sizing:border-box}
+ body{font-family:var(--sans);max-width:860px;margin:0 auto;padding:2rem 1rem 4rem;background:var(--bg);color:var(--fg);line-height:1.55}
+ a{color:var(--ring)}
+ .brand{display:flex;align-items:center;gap:.6rem;margin-bottom:.2rem}
+ .brand svg{width:30px;height:30px;flex:none}
+ h1{font-family:var(--mono);font-size:1.45rem;font-weight:700;margin:0;letter-spacing:-.5px}
+ .tag{color:var(--mfg);margin:.1rem 0 1rem;font-size:.95rem}
+ input,textarea,button{font:inherit;color:var(--fg)}
+ input,textarea{width:100%;background:var(--muted);border:1px solid var(--border);border-radius:10px;padding:.7rem .8rem}
+ input:focus,textarea:focus{outline:2px solid var(--ring);outline-offset:1px;border-color:var(--ring)}
+ .btn{background:var(--accent);color:var(--accent-fg);border:0;border-radius:10px;padding:.65rem 1.1rem;font-weight:600;cursor:pointer;transition:filter .18s,opacity .18s}
+ .btn:hover{filter:brightness(1.08)} .btn:disabled{opacity:.5;cursor:not-allowed}
+ .btn.ghost{background:transparent;color:var(--fg);border:1px solid var(--border)}
+ .btn.ghost:hover{background:var(--muted);filter:none}
+ .row{display:flex;gap:.55rem;flex-wrap:wrap;align-items:center;margin-top:.5rem}
+ .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:1rem}
+ .muted{color:var(--mfg);font-size:.9rem}
+ .chip{background:var(--muted);border:1px solid var(--border);color:var(--fg);border-radius:999px;padding:.3rem .7rem;font-size:.82rem;cursor:pointer;transition:background .18s,border-color .18s}
+ .chip:hover{border-color:var(--accent)}
+ .chips{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center;margin-top:.6rem}
+ .status{margin-top:.6rem;font-size:.9rem;min-height:1.2em}
+ .status.err{color:var(--danger)} .status.ok{color:var(--accent)}
+ .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--mfg);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px;margin-right:.4rem}
+ @keyframes spin{to{transform:rotate(360deg)}}
+ #tools{display:none;gap:.5rem;flex-wrap:wrap;align-items:center;margin:1.2rem 0 .2rem}
+ .toggle{display:inline-flex;align-items:center;gap:.4rem;color:var(--mfg);font-size:.88rem;cursor:pointer;user-select:none}
+ .toggle input{width:auto}
+ .repo-sep{margin:1.6rem 0 .2rem;padding:.35rem .7rem;border-left:3px solid var(--accent);color:var(--mfg);font-size:.88rem;font-family:var(--mono)}
+ .cell{margin-top:1.3rem;padding-top:1.1rem;border-top:1px solid var(--border)}
+ .cell:first-of-type{border-top:0}
+ .cell .ask{margin-top:.5rem}
+ .cits{display:flex;gap:.35rem;flex-wrap:wrap;margin:.6rem 0 .3rem}
+ .cit{display:inline-block;background:#1e3a2a;border:1px solid var(--accent);color:#bbf7d0;border-radius:6px;padding:.12rem .45rem;font-size:.8rem;font-family:var(--mono);text-decoration:none;transition:filter .15s}
+ a.cit:hover{filter:brightness(1.2)}
+ .ans{overflow-x:auto;margin-top:.3rem}
+ .ans.loading{color:var(--mfg)}
+ .ans-foot{margin-top:.4rem}
+ .copy{background:transparent;border:1px solid var(--border);color:var(--mfg);border-radius:6px;padding:.2rem .5rem;font-size:.78rem;cursor:pointer}
+ .copy:hover{border-color:var(--ring);color:var(--fg)}
  .md table{border-collapse:collapse;margin:.5rem 0;font-size:.9rem;display:block;overflow-x:auto}
- .md th,.md td{border:1px solid #30363d;padding:.3rem .55rem;text-align:left}
- .md th{background:#161b22}
- .md code{background:#161b22;padding:.1rem .3rem;border-radius:4px;font-size:.88em}
- .md pre{background:#161b22;padding:.8rem;border-radius:8px;overflow-x:auto}
+ .md th,.md td{border:1px solid var(--border);padding:.3rem .55rem;text-align:left}
+ .md th{background:var(--muted)}
+ .md code{background:var(--muted);padding:.1rem .35rem;border-radius:4px;font-size:.88em;font-family:var(--mono)}
+ .md pre{background:#0b1220;padding:.8rem;border-radius:8px;overflow-x:auto;border:1px solid var(--border)}
  .md pre code{background:none;padding:0}
- .md h1,.md h2,.md h3{font-size:1.02rem;margin:.7rem 0 .3rem}
- .md p{margin:.4rem 0} .md ul,.md ol{margin:.3rem 0 .3rem 1.2rem}
- details.about{margin:.7rem 0;border:1px solid #30363d;border-radius:8px;background:#0f141b}
- details.about summary{cursor:pointer;padding:.55rem .8rem;font-weight:600}
- details.about .about-body{padding:0 .8rem .75rem;color:#c9d1d9;font-size:.92rem;line-height:1.55}
- .repo-sep{margin:1.6rem 0 .2rem;padding:.3rem .6rem;border-left:3px solid #238636;color:#8b949e;font-size:.9rem}
+ .md h1,.md h2,.md h3{font-family:var(--mono);font-size:1.02rem;margin:.8rem 0 .3rem}
+ .md p{margin:.45rem 0} .md ul,.md ol{margin:.3rem 0 .3rem 1.25rem}
+ .mermaid{background:#0b1220;border:1px solid var(--border);border-radius:8px;padding:.8rem;margin:.6rem 0;text-align:center}
+ details.about{margin:.3rem 0 1rem;border:1px solid var(--border);border-radius:12px;background:var(--card)}
+ details.about summary{cursor:pointer;padding:.6rem .9rem;font-weight:600;list-style:none}
+ details.about summary::-webkit-details-marker{display:none}
+ details.about .about-body{padding:0 .9rem .85rem;color:var(--mfg);font-size:.92rem}
+ @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head>
 <body>
- <h1>🔍 Repo Explainer Agent</h1>
- <p class="muted">Load a public GitHub repo, then ask questions about its code. Answers cite the files they came from.</p>
- <details class="about"><summary>ℹ️ About this project</summary>
+ <div class="brand">
+   <svg viewBox="0 0 24 24" fill="none" stroke="#22C55E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+   <h1>Repo Explainer Agent</h1>
+ </div>
+ <p class="tag">Load a public GitHub repo, then ask questions about its code — answered with file:line citations.</p>
+
+ <details class="about"><summary>About this project &amp; how it works ▾</summary>
    <div class="about-body">
-     <b>Repo Explainer Agent</b> lets you load any public GitHub repository and ask natural-language
-     questions about its code. A Groq LLM retrieves the most relevant code via semantic search and
-     answers with <b>file:line citations</b> so you can verify every claim. You can ask multiple
-     questions and follow-ups once a repo is loaded.<br><br>
-     ⏳ <b>Loading a repo may take a little time</b> — it downloads the repo, splits it into chunks and
-     embeds them (bigger repos take longer). The first request after the demo has been idle also needs
+     <b style="color:var(--fg)">Repo Explainer Agent</b> loads any public GitHub repository and answers natural-language
+     questions about its code. It retrieves the most relevant code with semantic search and a Groq LLM answers
+     with <b style="color:var(--fg)">file:line citations</b> (click them to jump to GitHub), so you can verify
+     every claim. Ask multiple questions and follow-ups once a repo is loaded.<br><br>
+     <b style="color:var(--fg)">Loading a repo may take a little time</b> — it downloads the repo, splits it into
+     chunks and embeds them (bigger repos take longer). The first request after the demo has been idle also needs
      ~30–50s to wake up (free hosting).<br><br>
-     <span class="muted">Built with FastAPI · Groq (gpt-oss-20b) · Jina embeddings · in-memory vector search.</span>
+     Built with FastAPI · Groq (gpt-oss-20b) · Jina embeddings · in-memory vector search.
    </div>
  </details>
- <input id="repo" placeholder="https://github.com/owner/repo">
- <button id="load" onclick="ingest()">Load repo</button>
- <span id="status" class="muted"></span>
- <div id="qa" style="display:none;margin-top:1.2rem">
-   <div id="cells"></div>
+
+ <div class="card">
+   <div class="row">
+     <input id="repo" placeholder="https://github.com/owner/repo" style="flex:1 1 260px" onkeydown="if(event.key==='Enter')ingest()">
+     <button class="btn" id="load" onclick="ingest()">Load repo</button>
+   </div>
+   <div class="chips">
+     <span class="muted">Try:</span>
+     <button class="chip" onclick="useExample('https://github.com/jayahareeswarreddy/ChangeStream')">ChangeStream</button>
+     <button class="chip" onclick="useExample('https://github.com/pallets/flask')">Flask</button>
+     <button class="chip" onclick="useExample('https://github.com/psf/requests')">requests</button>
+   </div>
+   <div class="status" id="status" aria-live="polite"></div>
  </div>
+
+ <div id="tools">
+   <button class="btn ghost" onclick="preset('overview')">⌗ Architecture overview</button>
+   <button class="btn ghost" onclick="preset('diagram')">◇ Diagram</button>
+   <label class="toggle"><input type="checkbox" id="deep"> Thorough mode (slower, uses tools)</label>
+ </div>
+ <div id="cells"></div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <script>
-async function ingest(){
-  const b=document.getElementById('load'); b.disabled=true;
-  document.getElementById('status').textContent=' loading… (first load builds the index)';
-  const r=await fetch('/ingest',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({repo_url:document.getElementById('repo').value})});
-  const d=await r.json(); b.disabled=false;
-  if(d.error){document.getElementById('status').textContent=' ⚠ '+d.error;return;}
-  document.getElementById('status').textContent=` ✓ ${d.repo}: ${d.num_files} files, ${d.num_chunks} chunks`;
-  document.getElementById('qa').style.display='block';
-  const cells=document.getElementById('cells');
-  const sep=document.createElement('div'); sep.className='repo-sep';
-  sep.textContent='📁 Loaded '+d.repo;
-  cells.appendChild(sep);   // keep earlier Q&A; just mark the new repo
-  addCell();
-}
+let REPO=null, BRANCH='main', loadTimer=null;
+if(window.mermaid) mermaid.initialize({startOnLoad:false, theme:'dark'});
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
-function addCell(){
-  const cell=document.createElement('div'); cell.className='cell';
-  cell.innerHTML=`<textarea class="q" rows="2" placeholder="Ask a question about the repo…"></textarea>`
-    +`<button class="ask">Ask</button><div class="cits"></div><div class="ans md"></div>`;
-  document.getElementById('cells').appendChild(cell);
-  const ta=cell.querySelector('.q'), btn=cell.querySelector('.ask');
-  btn.onclick=()=>askCell(cell,ta,btn);
-  ta.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();btn.click();}});
-  ta.focus(); cell.scrollIntoView({behavior:'smooth',block:'center'});
+
+function useExample(url){ document.getElementById('repo').value=url; ingest(); }
+
+async function ingest(){
+  const repoUrl=document.getElementById('repo').value.trim(); if(!repoUrl) return;
+  const b=document.getElementById('load'), st=document.getElementById('status');
+  b.disabled=true; st.className='status';
+  const t0=Date.now();
+  const tick=()=>{ st.innerHTML=`<span class="spin"></span> Loading <b>${esc(repoUrl.replace('https://github.com/',''))}</b> — downloading &amp; embedding… ${((Date.now()-t0)/1000|0)}s`; };
+  tick(); clearInterval(loadTimer); loadTimer=setInterval(tick,1000);
+  try{
+    const r=await fetch('/ingest',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({repo_url:repoUrl})});
+    const d=await r.json();
+    clearInterval(loadTimer); b.disabled=false;
+    if(d.error){ st.className='status err'; st.textContent='⚠ '+d.error; return; }
+    REPO=d.repo; BRANCH=d.branch||'main';
+    st.className='status ok'; st.textContent=`✓ ${d.repo} — ${d.num_files} files, ${d.num_chunks} chunks indexed`;
+    document.getElementById('tools').style.display='flex';
+    const cells=document.getElementById('cells');
+    const sep=document.createElement('div'); sep.className='repo-sep'; sep.textContent='📁 '+d.repo;
+    cells.appendChild(sep);   // keep earlier Q&A; just mark the new repo
+    addCell();
+  }catch(e){ clearInterval(loadTimer); b.disabled=false; st.className='status err'; st.textContent='⚠ '+e; }
 }
-async function askCell(cell,ta,btn){
-  const q=ta.value.trim(); if(!q) return;
-  btn.disabled=true; ta.disabled=true;
-  const ans=cell.querySelector('.ans'); ans.textContent='Thinking…';
+
+function ghLink(ref){
+  const m=ref.match(/^(.*):(\\d+)-(\\d+)$/);
+  if(m && REPO) return `https://github.com/${REPO}/blob/${BRANCH}/${m[1]}#L${m[2]}-L${m[3]}`;
+  return null;
+}
+function renderCits(cits){
+  return (cits||[]).map(c=>{ const u=ghLink(c);
+    return u ? `<a class="cit" href="${u}" target="_blank" rel="noopener">${esc(c)}</a>`
+             : `<span class="cit">${esc(c)}</span>`; }).join('');
+}
+function renderMermaid(root){
+  if(!window.mermaid) return;
+  root.querySelectorAll('code.language-mermaid').forEach(code=>{
+    const div=document.createElement('div'); div.className='mermaid'; div.textContent=code.textContent;
+    (code.closest('pre')||code).replaceWith(div);
+  });
+  const nodes=root.querySelectorAll('.mermaid:not([data-processed])');
+  if(nodes.length){ try{ mermaid.run({nodes}); }catch(e){} }
+}
+
+async function runQuery(cell, question, slow){
+  const ans=cell.querySelector('.ans'), cits=cell.querySelector('.cits');
+  ans.className='ans md loading';
+  ans.innerHTML=`<span class="spin"></span>${slow?'Working on it — this may take a bit…':'Thinking…'}`;
+  cits.innerHTML='';
+  const deep=document.getElementById('deep') && document.getElementById('deep').checked;
   try{
     const r=await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({question:q})});
+      body:JSON.stringify({question, deep})});
     const d=await r.json();
-    if(d.error){ans.textContent='⚠ '+d.error; btn.disabled=false; ta.disabled=false; return;}
+    ans.className='ans md';
+    if(d.error){ ans.textContent='⚠ '+d.error; return false; }
     ans.innerHTML=window.marked?marked.parse(d.answer):esc(d.answer);
-    cell.querySelector('.cits').innerHTML=(d.citations||[]).map(c=>`<span class="cit">${esc(c)}</span>`).join('');
-    addCell();
-  }catch(e){ans.textContent='⚠ '+e; btn.disabled=false; ta.disabled=false;}
+    renderMermaid(ans);
+    cits.innerHTML=renderCits(d.citations);
+    const foot=document.createElement('div'); foot.className='ans-foot';
+    const cp=document.createElement('button'); cp.className='copy'; cp.textContent='Copy';
+    cp.onclick=()=>{ navigator.clipboard.writeText(d.answer); cp.textContent='Copied ✓'; setTimeout(()=>cp.textContent='Copy',1500); };
+    foot.appendChild(cp); ans.after(foot);
+    return true;
+  }catch(e){ ans.className='ans md'; ans.textContent='⚠ '+e; return false; }
+}
+
+function appendCell(interactive){
+  const cell=document.createElement('div'); cell.className='cell';
+  cell.innerHTML=`<textarea class="q" rows="2" placeholder="Ask about the repo…  (Ctrl/⌘+Enter to send)"></textarea>`
+    +`<div><button class="btn ask">Ask</button></div><div class="cits"></div><div class="ans md"></div>`;
+  document.getElementById('cells').appendChild(cell);
+  const ta=cell.querySelector('.q'), btn=cell.querySelector('.ask');
+  if(interactive){
+    btn.onclick=async()=>{ const q=ta.value.trim(); if(!q) return; ta.disabled=true; btn.disabled=true;
+      const ok=await runQuery(cell,q,false); if(ok) appendCell(true); };
+    ta.addEventListener('keydown',e=>{ if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){ e.preventDefault(); btn.click(); } });
+    ta.focus();
+  }
+  cell.scrollIntoView({behavior:'smooth',block:'center'});
+  return cell;
+}
+function addCell(){ return appendCell(true); }
+
+function preset(kind){
+  const q = kind==='overview'
+    ? "Give a concise architecture overview of this repository: what it does, its main components, and how data and control flow between them. Use short markdown headings and bullet points, and cite files as path:line-range."
+    : "Draw a Mermaid flowchart of the main components/modules of this repository and how they connect. Respond with ONLY a ```mermaid code block (use 'flowchart TD'), no prose.";
+  const cell=appendCell(false);
+  const ta=cell.querySelector('.q'); ta.value=(kind==='overview'?'Architecture overview':'Component diagram'); ta.disabled=true;
+  cell.querySelector('.ask').style.display='none';
+  runQuery(cell,q,true).then(ok=>{ if(ok) addCell(); });
 }
 </script>
 </body></html>"""
