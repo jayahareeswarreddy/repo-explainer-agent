@@ -69,6 +69,7 @@ def embed(texts):
 
 # in-memory index for the currently loaded repo (single-session demo)
 INDEX = {"repo": None, "files": {}, "chunks": [], "matrix": None, "norms": None}
+CONVO = []  # recent (question, answer) pairs, for follow-up questions
 
 # ----------------------------- ingestion ----------------------------------
 def parse_repo(url: str):
@@ -148,6 +149,7 @@ def build_index(repo_url: str):
 
     INDEX.update(repo=f"{owner}/{repo}", files=files, chunks=chunks,
                  matrix=vectors, norms=norms)
+    CONVO.clear()  # new repo => fresh conversation
     return {"repo": f"{owner}/{repo}", "num_files": len(files), "num_chunks": len(chunks)}
 
 # ----------------------------- tools --------------------------------------
@@ -224,7 +226,7 @@ def _complete_with_tools(messages):
     )
 
 
-def _synthesize(question, context):
+def _synthesize(question, context, history=None):
     """Final answer from gathered code, as a clean tool-free call."""
     excerpts = "\n\n".join(context)[:14000]
     msgs = [
@@ -232,8 +234,12 @@ def _synthesize(question, context):
          "You are a code assistant. Answer the question using ONLY the code excerpts "
          "provided. Cite sources as `path:line-range`. If the excerpts don't contain "
          "the answer, say so plainly."},
-        {"role": "user", "content": f"Question: {question}\n\nCode excerpts:\n{excerpts}"},
     ]
+    if history:
+        prior = "\n".join(f"Q: {q}\nA: {a[:400]}" for q, a in history)
+        msgs.append({"role": "system",
+                     "content": f"Earlier in this conversation (for follow-up context):\n{prior}"})
+    msgs.append({"role": "user", "content": f"Question: {question}\n\nCode excerpts:\n{excerpts}"})
     t = time.time()
     print(f"[synthesize] model={GROQ_MODEL} prompt_chars={len(excerpts)} -> calling Groq...", flush=True)
     try:
@@ -252,14 +258,18 @@ def run_agent(question: str, deep: bool = False):
     """Default: fast single-pass (retrieve top code, one LLM call to answer).
     deep=True runs the full tool-calling agent loop (slower, for hard questions)."""
     t = time.time()
-    seed = tool_search_code(question, k=5)
+    # For follow-ups, fold the previous question into the search so vague refs
+    # like "and how is that tested?" still retrieve the right code.
+    search_q = f"{CONVO[-1][0]} {question}" if CONVO else question
+    seed = tool_search_code(search_q, k=5)
     print(f"[agent] deep={deep} seed_retrieval={time.time()-t:.2f}s seed_chars={len(seed)}", flush=True)
     cited = {m.split(":")[0] for m in re.findall(r"[\w./-]+:\d+-\d+", seed)}
 
     if not deep:
-        r = {"answer": _synthesize(question, [seed]), "citations": sorted(cited)}
+        answer = _synthesize(question, [seed], history=CONVO[-2:])
+        CONVO.append((question, answer))
         print(f"[agent] total /ask time {time.time()-t:.1f}s", flush=True)
-        return r
+        return {"answer": answer, "citations": sorted(cited)}
 
     # --- deep mode: let the model call tools to gather more context ---
     context = [seed]
@@ -352,10 +362,26 @@ INDEX_HTML = """<!doctype html>
  .md pre code{background:none;padding:0}
  .md h1,.md h2,.md h3{font-size:1.02rem;margin:.7rem 0 .3rem}
  .md p{margin:.4rem 0} .md ul,.md ol{margin:.3rem 0 .3rem 1.2rem}
+ details.about{margin:.7rem 0;border:1px solid #30363d;border-radius:8px;background:#0f141b}
+ details.about summary{cursor:pointer;padding:.55rem .8rem;font-weight:600}
+ details.about .about-body{padding:0 .8rem .75rem;color:#c9d1d9;font-size:.92rem;line-height:1.55}
+ .repo-sep{margin:1.6rem 0 .2rem;padding:.3rem .6rem;border-left:3px solid #238636;color:#8b949e;font-size:.9rem}
 </style></head>
 <body>
  <h1>🔍 Repo Explainer Agent</h1>
  <p class="muted">Load a public GitHub repo, then ask questions about its code. Answers cite the files they came from.</p>
+ <details class="about"><summary>ℹ️ About this project</summary>
+   <div class="about-body">
+     <b>Repo Explainer Agent</b> lets you load any public GitHub repository and ask natural-language
+     questions about its code. A Groq LLM retrieves the most relevant code via semantic search and
+     answers with <b>file:line citations</b> so you can verify every claim. You can ask multiple
+     questions and follow-ups once a repo is loaded.<br><br>
+     ⏳ <b>Loading a repo may take a little time</b> — it downloads the repo, splits it into chunks and
+     embeds them (bigger repos take longer). The first request after the demo has been idle also needs
+     ~30–50s to wake up (free hosting).<br><br>
+     <span class="muted">Built with FastAPI · Groq (gpt-oss-20b) · Jina embeddings · in-memory vector search.</span>
+   </div>
+ </details>
  <input id="repo" placeholder="https://github.com/owner/repo">
  <button id="load" onclick="ingest()">Load repo</button>
  <span id="status" class="muted"></span>
@@ -373,7 +399,11 @@ async function ingest(){
   if(d.error){document.getElementById('status').textContent=' ⚠ '+d.error;return;}
   document.getElementById('status').textContent=` ✓ ${d.repo}: ${d.num_files} files, ${d.num_chunks} chunks`;
   document.getElementById('qa').style.display='block';
-  const cells=document.getElementById('cells'); cells.innerHTML=''; addCell();
+  const cells=document.getElementById('cells');
+  const sep=document.createElement('div'); sep.className='repo-sep';
+  sep.textContent='📁 Loaded '+d.repo;
+  cells.appendChild(sep);   // keep earlier Q&A; just mark the new repo
+  addCell();
 }
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 function addCell(){
@@ -383,6 +413,7 @@ function addCell(){
   document.getElementById('cells').appendChild(cell);
   const ta=cell.querySelector('.q'), btn=cell.querySelector('.ask');
   btn.onclick=()=>askCell(cell,ta,btn);
+  ta.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();btn.click();}});
   ta.focus(); cell.scrollIntoView({behavior:'smooth',block:'center'});
 }
 async function askCell(cell,ta,btn){
