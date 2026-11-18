@@ -251,16 +251,32 @@ SYSTEM = (
 )
 
 # ----------------------------- agent loop ---------------------------------
+def _groq_create(**kwargs):
+    """Groq call with back-off on the free tier's 8k tokens/minute (429) limit."""
+    for _ in range(3):
+        try:
+            return groq_client.chat.completions.create(**kwargs)
+        except Exception as e:
+            msg = str(e)
+            if "rate_limit" in msg or "429" in msg:
+                m = re.search(r"try again in ([0-9.]+)s", msg)
+                time.sleep(min(float(m.group(1)) + 1, 30) if m else 20)
+                continue
+            raise
+    raise ValueError("Groq rate limit (free tier allows ~8,000 tokens/minute). "
+                     "Please wait a minute and try again, or use a smaller repo/question.")
+
+
 def _complete_with_tools(messages):
-    return groq_client.chat.completions.create(
+    return _groq_create(
         model=GROQ_MODEL, messages=messages, tools=TOOLS, tool_choice="auto",
-        temperature=0.2, extra_body={"reasoning_effort": "low"},
+        temperature=0.2, max_completion_tokens=1200, extra_body={"reasoning_effort": "low"},
     )
 
 
 def _synthesize(question, context, history=None):
     """Final answer from gathered code, as a clean tool-free call."""
-    excerpts = "\n\n".join(context)[:14000]
+    excerpts = "\n\n".join(context)[:7000]
     msgs = [
         {"role": "system", "content":
          "You are a code assistant. Answer the question using ONLY the code excerpts "
@@ -275,13 +291,15 @@ def _synthesize(question, context, history=None):
     t = time.time()
     print(f"[synthesize] model={GROQ_MODEL} prompt_chars={len(excerpts)} -> calling Groq...", flush=True)
     try:
-        resp = groq_client.chat.completions.create(
+        resp = _groq_create(
             model=GROQ_MODEL, messages=msgs, temperature=0.2,
-            extra_body={"reasoning_effort": "low"})
+            max_completion_tokens=1200, extra_body={"reasoning_effort": "low"})
         print(f"[synthesize] Groq returned in {time.time()-t:.1f}s  usage={getattr(resp, 'usage', None)}", flush=True)
         return resp.choices[0].message.content or ""
     except Exception as e:
         print(f"[synthesize] ERROR after {time.time()-t:.1f}s: {e}", flush=True)
+        if "rate limit" in str(e).lower():
+            return f"⚠ {e}"
         # last-resort fallback: hand back the most relevant excerpt
         return "Here are the most relevant code sections:\n\n" + (context[0] if context else "(none)")
 
@@ -293,7 +311,7 @@ def run_agent(question: str, deep: bool = False):
     # For follow-ups, fold the previous question into the search so vague refs
     # like "and how is that tested?" still retrieve the right code.
     search_q = f"{CONVO[-1][0]} {question}" if CONVO else question
-    seed = tool_search_code(search_q, k=5)
+    seed = tool_search_code(search_q, k=4)
     print(f"[agent] deep={deep} seed_retrieval={time.time()-t:.2f}s seed_chars={len(seed)}", flush=True)
     cited = set(re.findall(r"[\w./-]+:\d+-\d+", seed))
 
@@ -529,6 +547,8 @@ async function ingest(){
   const repoUrl=document.getElementById('repo').value.trim(); if(!repoUrl) return;
   const b=document.getElementById('load'), st=document.getElementById('status');
   b.disabled=true; st.className='status';
+  document.getElementById('tools').style.display='none';   // no tools/chatbox while loading
+  document.getElementById('cells').innerHTML='';
   const t0=Date.now();
   const tick=()=>{ st.innerHTML=`<span class="spin"></span> Loading <b>${esc(repoUrl.replace('https://github.com/',''))}</b> — downloading &amp; embedding… ${((Date.now()-t0)/1000|0)}s`; };
   tick(); clearInterval(loadTimer); loadTimer=setInterval(tick,1000);
@@ -613,12 +633,11 @@ function openDrawer(title){
   document.getElementById('drawerTitle').textContent=title;
   document.getElementById('drawer').classList.add('open');
   document.getElementById('drawer').setAttribute('aria-hidden','false');
-  document.getElementById('overlay').classList.add('open');
+  // non-blocking: no overlay, so the chatbox stays usable while the panel is open
 }
 function closeDrawer(){
   document.getElementById('drawer').classList.remove('open');
   document.getElementById('drawer').setAttribute('aria-hidden','true');
-  document.getElementById('overlay').classList.remove('open');
 }
 function diagSvg(container){ return container.querySelector('.mermaid svg') || container.querySelector('svg'); }
 function downloadSvg(svg){
