@@ -522,8 +522,9 @@ async function ingest(){
     st.className='status ok'; st.textContent=`✓ ${d.repo} — ${d.num_files} files, ${d.num_chunks} chunks indexed`;
     document.getElementById('tools').style.display='flex';
     const cells=document.getElementById('cells');
+    cells.innerHTML='';   // new repo => clear previous conversation
     const sep=document.createElement('div'); sep.className='repo-sep'; sep.textContent='📁 '+d.repo;
-    cells.appendChild(sep);   // keep earlier Q&A; just mark the new repo
+    cells.appendChild(sep);
     addCell();
   }catch(e){ clearInterval(loadTimer); b.disabled=false; st.className='status err'; st.textContent='⚠ '+e; }
 }
@@ -573,14 +574,14 @@ async function runQuery(cell, question, slow){
 
 function appendCell(interactive){
   const cell=document.createElement('div'); cell.className='cell';
-  cell.innerHTML=`<textarea class="q" rows="2" placeholder="Ask about the repo…  (Ctrl/⌘+Enter to send)"></textarea>`
+  cell.innerHTML=`<textarea class="q" rows="2" placeholder="Ask about the repo…  (Enter to send, Shift+Enter for a new line)"></textarea>`
     +`<div><button class="btn ask">Ask</button></div><div class="cits"></div><div class="ans md"></div>`;
   document.getElementById('cells').appendChild(cell);
   const ta=cell.querySelector('.q'), btn=cell.querySelector('.ask');
   if(interactive){
     btn.onclick=async()=>{ const q=ta.value.trim(); if(!q) return; ta.disabled=true; btn.disabled=true;
       const ok=await runQuery(cell,q,false); if(ok) appendCell(true); };
-    ta.addEventListener('keydown',e=>{ if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){ e.preventDefault(); btn.click(); } });
+    ta.addEventListener('keydown',e=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); btn.click(); } });
     ta.focus();
   }
   cell.scrollIntoView({behavior:'smooth',block:'center'});
