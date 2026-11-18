@@ -82,8 +82,13 @@ def parse_repo(url: str):
 def fetch_repo_files(owner: str, repo: str):
     meta = requests.get(f"https://api.github.com/repos/{owner}/{repo}",
                         headers=GH_HEADERS, timeout=30)
+    if meta.status_code == 403 and meta.headers.get("X-RateLimit-Remaining") == "0":
+        raise ValueError("GitHub API rate limit reached (unauthenticated = 60/hr). "
+                         "Set a GITHUB_TOKEN env var to raise it to 5000/hr.")
+    if meta.status_code == 404:
+        raise ValueError("Repo not found — check it's public and the URL is correct.")
     if meta.status_code != 200:
-        raise ValueError(f"GitHub API error ({meta.status_code}). Repo private or not found?")
+        raise ValueError(f"GitHub API error ({meta.status_code}).")
     branch = meta.json().get("default_branch", "main")
     zurl = f"https://codeload.github.com/{owner}/{repo}/zip/refs/heads/{branch}"
     z = requests.get(zurl, headers=GH_HEADERS, timeout=60)
