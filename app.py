@@ -316,7 +316,12 @@ def run_agent(question: str, deep: bool = False):
     cited = set(re.findall(r"[\w./-]+:\d+-\d+", seed))
 
     if not deep:
-        answer = _synthesize(question, [seed], history=CONVO[-2:])
+        ctx = [seed]
+        # Whole-repo questions (overview/diagram) need structure, not just 4 chunks.
+        if re.search(r"architect|overview|flowchart|diagram|components?|structure|what.*(repo|project).*(do|about)", question, re.I):
+            tree = "\n".join(sorted(INDEX["files"].keys())[:140])
+            ctx.insert(0, "Repository file tree (paths):\n" + tree)
+        answer = _synthesize(question, ctx, history=CONVO[-2:])
         CONVO.append((question, answer))
         print(f"[agent] total /ask time {time.time()-t:.1f}s", flush=True)
         return {"answer": answer, "citations": sorted(cited)}
@@ -679,7 +684,7 @@ async function preset(kind){
     if(d.error){ body.textContent='⚠ '+d.error; return; }
     body.innerHTML=window.marked?marked.parse(d.answer):esc(d.answer);
     renderMermaid(body);
-    if(kind==='diagram'){
+    if(kind==='diagram' && diagSvg(body)){   // only when a real diagram rendered
       const bar=document.createElement('div'); bar.className='row'; bar.style.margin='0 0 .7rem';
       const fs=document.createElement('button'); fs.className='btn ghost'; fs.textContent='⤢ Full screen'; fs.onclick=()=>openFull(diagSvg(body));
       const dl=document.createElement('button'); dl.className='btn ghost'; dl.textContent='⬇ Download SVG'; dl.onclick=()=>downloadSvg(diagSvg(body));
