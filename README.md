@@ -5,7 +5,7 @@ answers grounded in the actual code, **with file/line citations**. A Groq LLM
 drives a plan-act-observe **agent loop** over three tools, deciding when to
 search, read a file, or browse the structure before it answers.
 
-**Links:** [Live demo](#) · Built with FastAPI, Groq (Llama 3.3), fastembed (ONNX)
+**Links:** [Live demo](https://repo-explainer-agent.onrender.com) · Built with FastAPI, Groq (gpt-oss-20b), fastembed (ONNX)
 
 ## What makes it an agent (not just RAG)
 
