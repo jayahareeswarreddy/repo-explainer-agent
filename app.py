@@ -52,22 +52,31 @@ groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 
 
 def embed(texts):
-    """Embed a list of strings via the Jina API. Returns an (n, dim) float32 array."""
+    """Embed a list of strings via the Jina API. Returns an (n, dim) float32 array.
+    Batches are small and paced, with 429 back-off, to respect the free tier's
+    per-minute token limit on large repos."""
     vectors = []
-    for i in range(0, len(texts), 96):  # batch to keep payloads reasonable
-        batch = texts[i:i + 96]
-        r = requests.post(
-            "https://api.jina.ai/v1/embeddings",
-            headers={"Authorization": f"Bearer {JINA_API_KEY}",
-                     "Content-Type": "application/json"},
-            json={"model": JINA_MODEL, "input": batch},
-            timeout=60,
-        )
-        if r.status_code != 200:
-            # surface Jina's actual reason instead of a generic HTTP error
+    for i in range(0, len(texts), 48):
+        batch = texts[i:i + 48]
+        for attempt in range(6):
+            r = requests.post(
+                "https://api.jina.ai/v1/embeddings",
+                headers={"Authorization": f"Bearer {JINA_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={"model": JINA_MODEL, "input": batch},
+                timeout=60,
+            )
+            if r.status_code == 200:
+                break
+            if r.status_code == 429:
+                time.sleep(5)  # per-minute token limit — back off and retry
+                continue
             raise ValueError(f"Jina embeddings error {r.status_code}: {r.text[:300]}")
+        else:
+            raise ValueError("Jina rate limit hit repeatedly — wait a minute, or try a smaller repo.")
         items = sorted(r.json()["data"], key=lambda d: d["index"])
         vectors.extend(d["embedding"] for d in items)
+        time.sleep(0.3)  # pace requests to stay under the per-minute token cap
     return np.array(vectors, dtype=np.float32)
 
 # in-memory index for the currently loaded repo (single-session demo)
@@ -436,6 +445,14 @@ INDEX_HTML = """<!doctype html>
  details.about summary{cursor:pointer;padding:.6rem .9rem;font-weight:600;list-style:none}
  details.about summary::-webkit-details-marker{display:none}
  details.about .about-body{padding:0 .9rem .85rem;color:var(--mfg);font-size:.92rem}
+ #overlay{position:fixed;inset:0;background:#0009;opacity:0;pointer-events:none;transition:opacity .2s;z-index:40}
+ #overlay.open{opacity:1;pointer-events:auto}
+ #drawer{position:fixed;top:0;right:0;height:100%;width:480px;max-width:92vw;background:var(--card);border-left:1px solid var(--border);transform:translateX(100%);transition:transform .25s ease;z-index:50;display:flex;flex-direction:column}
+ #drawer.open{transform:translateX(0)}
+ .drawer-head{display:flex;align-items:center;justify-content:space-between;padding:.8rem 1rem;border-bottom:1px solid var(--border);font-family:var(--mono);font-weight:600}
+ .drawer-body{padding:1rem;overflow:auto}
+ .x{background:transparent;border:0;color:var(--mfg);font-size:1.5rem;line-height:1;cursor:pointer;padding:0 .3rem}
+ .x:hover{color:var(--fg)}
  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head>
 <body>
@@ -463,12 +480,6 @@ INDEX_HTML = """<!doctype html>
      <input id="repo" placeholder="https://github.com/owner/repo" style="flex:1 1 260px" onkeydown="if(event.key==='Enter')ingest()">
      <button class="btn" id="load" onclick="ingest()">Load repo</button>
    </div>
-   <div class="chips">
-     <span class="muted">Try:</span>
-     <button class="chip" onclick="useExample('https://github.com/jayahareeswarreddy/ChangeStream')">ChangeStream</button>
-     <button class="chip" onclick="useExample('https://github.com/pallets/flask')">Flask</button>
-     <button class="chip" onclick="useExample('https://github.com/psf/requests')">requests</button>
-   </div>
    <div class="status" id="status" aria-live="polite"></div>
  </div>
 
@@ -478,6 +489,12 @@ INDEX_HTML = """<!doctype html>
    <label class="toggle"><input type="checkbox" id="deep"> Thorough mode (slower, uses tools)</label>
  </div>
  <div id="cells"></div>
+
+ <div id="overlay" onclick="closeDrawer()"></div>
+ <aside id="drawer" aria-hidden="true" aria-label="Result panel">
+   <div class="drawer-head"><span id="drawerTitle"></span><button class="x" onclick="closeDrawer()" aria-label="Close panel">&times;</button></div>
+   <div class="drawer-body md" id="drawerBody"></div>
+ </aside>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
@@ -571,14 +588,38 @@ function appendCell(interactive){
 }
 function addCell(){ return appendCell(true); }
 
-function preset(kind){
+function openDrawer(title){
+  document.getElementById('drawerTitle').textContent=title;
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('drawer').setAttribute('aria-hidden','false');
+  document.getElementById('overlay').classList.add('open');
+}
+function closeDrawer(){
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('drawer').setAttribute('aria-hidden','true');
+  document.getElementById('overlay').classList.remove('open');
+}
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeDrawer(); });
+
+async function preset(kind){
   const q = kind==='overview'
     ? "Give a concise architecture overview of this repository: what it does, its main components, and how data and control flow between them. Use short markdown headings and bullet points, and cite files as path:line-range."
     : "Draw a Mermaid flowchart of the main components/modules of this repository and how they connect. Respond with ONLY a ```mermaid code block (use 'flowchart TD'), no prose.";
-  const cell=appendCell(false);
-  const ta=cell.querySelector('.q'); ta.value=(kind==='overview'?'Architecture overview':'Component diagram'); ta.disabled=true;
-  cell.querySelector('.ask').style.display='none';
-  runQuery(cell,q,true).then(ok=>{ if(ok) addCell(); });
+  openDrawer(kind==='overview' ? 'Architecture overview' : 'Component diagram');
+  const body=document.getElementById('drawerBody'); body.className='drawer-body md';
+  body.innerHTML=`<span class="spin"></span> Working on it — this may take a bit…`;
+  const deep=document.getElementById('deep') && document.getElementById('deep').checked;
+  try{
+    const r=await fetch('/ask',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:q, deep})});
+    const d=await r.json();
+    if(d.error){ body.textContent='⚠ '+d.error; return; }
+    body.innerHTML=window.marked?marked.parse(d.answer):esc(d.answer);
+    renderMermaid(body);
+    if(d.citations && d.citations.length){
+      const c=document.createElement('div'); c.className='cits'; c.innerHTML=renderCits(d.citations); body.appendChild(c);
+    }
+  }catch(e){ body.textContent='⚠ '+e; }
 }
 </script>
 </body></html>"""
