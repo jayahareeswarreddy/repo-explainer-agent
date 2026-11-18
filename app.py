@@ -27,7 +27,7 @@ from groq import Groq
 # ----------------------------- config -------------------------------------
 GROQ_MODEL = "openai/gpt-oss-20b"
 JINA_API_KEY = os.environ.get("JINA_API_KEY") or os.environ.get("JINA_API_TOKEN", "")
-JINA_MODEL = "jina-embeddings-v2-small-en"
+JINA_MODEL = "jina-embeddings-v3"
 CODE_EXTS = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rb", ".rs",
     ".c", ".h", ".cpp", ".hpp", ".cs", ".php", ".kt", ".swift", ".scala",
@@ -62,7 +62,9 @@ def embed(texts):
             json={"model": JINA_MODEL, "input": batch},
             timeout=60,
         )
-        r.raise_for_status()
+        if r.status_code != 200:
+            # surface Jina's actual reason instead of a generic HTTP error
+            raise ValueError(f"Jina embeddings error {r.status_code}: {r.text[:300]}")
         items = sorted(r.json()["data"], key=lambda d: d["index"])
         vectors.extend(d["embedding"] for d in items)
     return np.array(vectors, dtype=np.float32)
