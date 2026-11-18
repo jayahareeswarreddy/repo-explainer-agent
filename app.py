@@ -387,11 +387,11 @@ INDEX_HTML = """<!doctype html>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
  :root{
-   --bg:#0E1310; --card:#161C17; --muted:#1F2620; --border:#2E372F;
-   --fg:#ECEAE0; --mfg:#A3B0A3; --accent:#8FD6A8; --accent-fg:#0E1310;
-   --gold:#D8C9A0; --ring:#A9D8BD; --danger:#E89B8B;
+   --bg:#F2ECDF; --card:#FCF9F2; --muted:#EBE2D1; --border:#D9CDB6;
+   --fg:#2A2722; --mfg:#6E6657; --accent:#4F6B54; --accent-fg:#FCF9F2;
+   --gold:#A98A52; --ring:#4F6B54; --danger:#A84B32; --code-bg:#EEE6D4;
    --sans:'IBM Plex Sans',system-ui,sans-serif; --mono:'JetBrains Mono',ui-monospace,monospace;
-   color-scheme:dark;
+   color-scheme:light;
  }
  *{box-sizing:border-box}
  body{font-family:var(--sans);max-width:860px;margin:0 auto;padding:2rem 1rem 4rem;background:var(--bg);color:var(--fg);line-height:1.55}
@@ -425,8 +425,8 @@ INDEX_HTML = """<!doctype html>
  .cell:first-of-type{border-top:0}
  .cell .ask{margin-top:.5rem}
  .cits{display:flex;gap:.35rem;flex-wrap:wrap;margin:.6rem 0 .3rem}
- .cit{display:inline-block;background:#242017;border:1px solid var(--gold);color:#efe3c1;border-radius:6px;padding:.12rem .45rem;font-size:.8rem;font-family:var(--mono);text-decoration:none;transition:filter .15s}
- a.cit:hover{filter:brightness(1.18)}
+ .cit{display:inline-block;background:#EFE6D2;border:1px solid var(--gold);color:#6a5733;border-radius:6px;padding:.12rem .45rem;font-size:.8rem;font-family:var(--mono);text-decoration:none;transition:filter .15s}
+ a.cit:hover{filter:brightness(.97)}
  .ans{overflow-x:auto;margin-top:.3rem}
  .ans.loading{color:var(--mfg)}
  .ans-foot{margin-top:.4rem}
@@ -436,16 +436,16 @@ INDEX_HTML = """<!doctype html>
  .md th,.md td{border:1px solid var(--border);padding:.3rem .55rem;text-align:left}
  .md th{background:var(--muted)}
  .md code{background:var(--muted);padding:.1rem .35rem;border-radius:4px;font-size:.88em;font-family:var(--mono)}
- .md pre{background:#0b1220;padding:.8rem;border-radius:8px;overflow-x:auto;border:1px solid var(--border)}
+ .md pre{background:var(--code-bg);padding:.8rem;border-radius:8px;overflow-x:auto;border:1px solid var(--border)}
  .md pre code{background:none;padding:0}
  .md h1,.md h2,.md h3{font-family:var(--mono);font-size:1.02rem;margin:.8rem 0 .3rem}
  .md p{margin:.45rem 0} .md ul,.md ol{margin:.3rem 0 .3rem 1.25rem}
- .mermaid{background:#0b1220;border:1px solid var(--border);border-radius:8px;padding:.8rem;margin:.6rem 0;text-align:center}
+ .mermaid{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:.8rem;margin:.6rem 0;text-align:center}
  details.about{margin:.3rem 0 1rem;border:1px solid var(--border);border-radius:12px;background:var(--card)}
  details.about summary{cursor:pointer;padding:.6rem .9rem;font-weight:600;list-style:none}
  details.about summary::-webkit-details-marker{display:none}
  details.about .about-body{padding:0 .9rem .85rem;color:var(--mfg);font-size:.92rem}
- #overlay{position:fixed;inset:0;background:#0009;opacity:0;pointer-events:none;transition:opacity .2s;z-index:40}
+ #overlay{position:fixed;inset:0;background:rgba(42,39,34,.42);opacity:0;pointer-events:none;transition:opacity .2s;z-index:40}
  #overlay.open{opacity:1;pointer-events:auto}
  #drawer{position:fixed;top:0;right:0;height:100%;width:480px;max-width:92vw;background:var(--card);border-left:1px solid var(--border);transform:translateX(100%);transition:transform .25s ease;z-index:50;display:flex;flex-direction:column}
  #drawer.open{transform:translateX(0)}
@@ -456,7 +456,7 @@ INDEX_HTML = """<!doctype html>
  .drag-handle{position:absolute;left:0;top:0;width:9px;height:100%;cursor:ew-resize;z-index:2}
  .drag-handle::before{content:"";position:absolute;left:3px;top:50%;transform:translateY(-50%);width:3px;height:42px;border-radius:3px;background:var(--border)}
  .drag-handle:hover::before{background:var(--accent)}
- #diagModal{position:fixed;inset:0;background:rgba(6,10,8,.82);display:none;flex-direction:column;z-index:70;padding:1rem}
+ #diagModal{position:fixed;inset:0;background:rgba(42,39,34,.62);display:none;flex-direction:column;z-index:70;padding:1rem}
  #diagModal.open{display:flex}
  .diag-head{display:flex;justify-content:space-between;align-items:center;color:var(--fg);font-family:var(--mono);font-weight:600;margin-bottom:.5rem}
  .diag-head .row{margin:0}
@@ -466,7 +466,7 @@ INDEX_HTML = """<!doctype html>
 </style></head>
 <body>
  <div class="brand">
-   <svg viewBox="0 0 24 24" fill="none" stroke="#8FD6A8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+   <svg viewBox="0 0 24 24" fill="none" stroke="#4F6B54" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
    <h1>Repo Explainer Agent</h1>
  </div>
  <p class="tag">Load a public GitHub repo, then ask questions about its code — answered with file:line citations.</p>
@@ -520,7 +520,7 @@ INDEX_HTML = """<!doctype html>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
 <script>
 let REPO=null, BRANCH='main', loadTimer=null;
-if(window.mermaid) mermaid.initialize({startOnLoad:false, theme:'dark'});
+if(window.mermaid) mermaid.initialize({startOnLoad:false, theme:'neutral'});
 function esc(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
 
 function useExample(url){ document.getElementById('repo').value=url; ingest(); }
