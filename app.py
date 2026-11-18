@@ -387,9 +387,9 @@ INDEX_HTML = """<!doctype html>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
  :root{
-   --bg:#0F172A; --card:#1B2336; --muted:#272F42; --border:#334155;
-   --fg:#F8FAFC; --mfg:#94A3B8; --accent:#22C55E; --accent-fg:#0F172A;
-   --ring:#38BDF8; --danger:#F87171;
+   --bg:#0E1310; --card:#161C17; --muted:#1F2620; --border:#2E372F;
+   --fg:#ECEAE0; --mfg:#A3B0A3; --accent:#8FD6A8; --accent-fg:#0E1310;
+   --gold:#D8C9A0; --ring:#A9D8BD; --danger:#E89B8B;
    --sans:'IBM Plex Sans',system-ui,sans-serif; --mono:'JetBrains Mono',ui-monospace,monospace;
    color-scheme:dark;
  }
@@ -425,8 +425,8 @@ INDEX_HTML = """<!doctype html>
  .cell:first-of-type{border-top:0}
  .cell .ask{margin-top:.5rem}
  .cits{display:flex;gap:.35rem;flex-wrap:wrap;margin:.6rem 0 .3rem}
- .cit{display:inline-block;background:#1e3a2a;border:1px solid var(--accent);color:#bbf7d0;border-radius:6px;padding:.12rem .45rem;font-size:.8rem;font-family:var(--mono);text-decoration:none;transition:filter .15s}
- a.cit:hover{filter:brightness(1.2)}
+ .cit{display:inline-block;background:#242017;border:1px solid var(--gold);color:#efe3c1;border-radius:6px;padding:.12rem .45rem;font-size:.8rem;font-family:var(--mono);text-decoration:none;transition:filter .15s}
+ a.cit:hover{filter:brightness(1.18)}
  .ans{overflow-x:auto;margin-top:.3rem}
  .ans.loading{color:var(--mfg)}
  .ans-foot{margin-top:.4rem}
@@ -453,11 +453,20 @@ INDEX_HTML = """<!doctype html>
  .drawer-body{padding:1rem;overflow:auto}
  .x{background:transparent;border:0;color:var(--mfg);font-size:1.5rem;line-height:1;cursor:pointer;padding:0 .3rem}
  .x:hover{color:var(--fg)}
+ .drag-handle{position:absolute;left:0;top:0;width:9px;height:100%;cursor:ew-resize;z-index:2}
+ .drag-handle::before{content:"";position:absolute;left:3px;top:50%;transform:translateY(-50%);width:3px;height:42px;border-radius:3px;background:var(--border)}
+ .drag-handle:hover::before{background:var(--accent)}
+ #diagModal{position:fixed;inset:0;background:rgba(6,10,8,.82);display:none;flex-direction:column;z-index:70;padding:1rem}
+ #diagModal.open{display:flex}
+ .diag-head{display:flex;justify-content:space-between;align-items:center;color:var(--fg);font-family:var(--mono);font-weight:600;margin-bottom:.5rem}
+ .diag-head .row{margin:0}
+ #diagModalBody{flex:1;overflow:auto;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:1rem;display:flex;align-items:center;justify-content:center}
+ #diagModalBody svg{width:100%;height:auto;max-height:100%}
  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head>
 <body>
  <div class="brand">
-   <svg viewBox="0 0 24 24" fill="none" stroke="#22C55E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+   <svg viewBox="0 0 24 24" fill="none" stroke="#8FD6A8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
    <h1>Repo Explainer Agent</h1>
  </div>
  <p class="tag">Load a public GitHub repo, then ask questions about its code — answered with file:line citations.</p>
@@ -492,9 +501,20 @@ INDEX_HTML = """<!doctype html>
 
  <div id="overlay" onclick="closeDrawer()"></div>
  <aside id="drawer" aria-hidden="true" aria-label="Result panel">
+   <div class="drag-handle" id="dragHandle" title="Drag to resize"></div>
    <div class="drawer-head"><span id="drawerTitle"></span><button class="x" onclick="closeDrawer()" aria-label="Close panel">&times;</button></div>
    <div class="drawer-body md" id="drawerBody"></div>
  </aside>
+
+ <div id="diagModal">
+   <div class="diag-head"><span>Component diagram</span>
+     <div class="row">
+       <button class="btn ghost" onclick="downloadSvg(document.querySelector('#diagModalBody svg'))">⬇ Download SVG</button>
+       <button class="x" onclick="closeFull()" aria-label="Close">&times;</button>
+     </div>
+   </div>
+   <div id="diagModalBody"></div>
+ </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
@@ -600,7 +620,30 @@ function closeDrawer(){
   document.getElementById('drawer').setAttribute('aria-hidden','true');
   document.getElementById('overlay').classList.remove('open');
 }
-document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeDrawer(); });
+function diagSvg(container){ return container.querySelector('.mermaid svg') || container.querySelector('svg'); }
+function downloadSvg(svg){
+  if(!svg){ return; }
+  const s=new XMLSerializer().serializeToString(svg);
+  const blob=new Blob([s],{type:'image/svg+xml;charset=utf-8'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='diagram.svg';
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
+}
+function openFull(svg){
+  const b=document.getElementById('diagModalBody'); b.innerHTML='';
+  if(svg){ const c=svg.cloneNode(true); c.removeAttribute('width'); c.removeAttribute('height'); b.appendChild(c); }
+  document.getElementById('diagModal').classList.add('open');
+}
+function closeFull(){ document.getElementById('diagModal').classList.remove('open'); }
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeFull(); closeDrawer(); } });
+// drag the drawer's left edge to resize it
+(function(){
+  const h=document.getElementById('dragHandle'), dr=document.getElementById('drawer'); if(!h) return;
+  let on=false;
+  h.addEventListener('mousedown',e=>{ on=true; e.preventDefault(); document.body.style.userSelect='none'; });
+  window.addEventListener('mousemove',e=>{ if(!on) return; let w=window.innerWidth-e.clientX;
+    w=Math.max(340, Math.min(w, window.innerWidth*0.96)); dr.style.width=w+'px'; });
+  window.addEventListener('mouseup',()=>{ on=false; document.body.style.userSelect=''; });
+})();
 
 async function preset(kind){
   const q = kind==='overview'
@@ -617,6 +660,12 @@ async function preset(kind){
     if(d.error){ body.textContent='⚠ '+d.error; return; }
     body.innerHTML=window.marked?marked.parse(d.answer):esc(d.answer);
     renderMermaid(body);
+    if(kind==='diagram'){
+      const bar=document.createElement('div'); bar.className='row'; bar.style.margin='0 0 .7rem';
+      const fs=document.createElement('button'); fs.className='btn ghost'; fs.textContent='⤢ Full screen'; fs.onclick=()=>openFull(diagSvg(body));
+      const dl=document.createElement('button'); dl.className='btn ghost'; dl.textContent='⬇ Download SVG'; dl.onclick=()=>downloadSvg(diagSvg(body));
+      bar.append(fs,dl); body.prepend(bar);
+    }
     if(d.citations && d.citations.length){
       const c=document.createElement('div'); c.className='cits'; c.innerHTML=renderCits(d.citations); body.appendChild(c);
     }
